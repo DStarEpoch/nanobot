@@ -11,7 +11,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.bus.events import OutboundMessage
 
-from aimi_sdk import aimi
+import aimi
 
 _LOGGER = logging.getLogger(__name__)
 
