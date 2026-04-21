@@ -6,6 +6,7 @@ Connect nanobot to your favorite chat platform. Want to build your own? See the 
 |---------|---------------|
 | **Telegram** | Bot token from @BotFather |
 | **Discord** | Bot token + Message Content intent |
+| **AIMI** | Bot token |
 | **WhatsApp** | QR code scan (`nanobot channels login whatsapp`) |
 | **WeChat (Weixin)** | QR code scan (`nanobot channels login weixin`) |
 | **Feishu** | App ID + App Secret |

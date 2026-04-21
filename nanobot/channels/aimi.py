@@ -2,25 +2,28 @@
 
 from __future__ import annotations
 
-import logging
+import asyncio
+import importlib.util
 from typing import Any
+
+from loguru import logger
 from pydantic import Field
 
-from nanobot.config.schema import Base
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from nanobot.bus.events import OutboundMessage
+from nanobot.config.schema import Base
 
-import aimi
+AIMI_AVAILABLE = importlib.util.find_spec("aimi") is not None
 
-_LOGGER = logging.getLogger(__name__)
+if AIMI_AVAILABLE:
+    import aimi
 
 
 class AimiConfig(Base):
     enabled: bool = False
     token: str = ""
-    allow_from: list[str] = Field(default_factory=list)
-    gateway_url: str | None = None
+    allow_from: list[str] = Field(default=["*"])
 
 
 class AimiChannel(BaseChannel):
@@ -29,49 +32,76 @@ class AimiChannel(BaseChannel):
     name = "aimi"
     display_name = "AIMI"
 
-    def __init__(self, config: Any, bus: MessageBus):
-        if isinstance(config, dict):
-            config = AimiConfig(**config)
-        super().__init__(config, bus)
-        self.client = aimi.Client()
-        self._running = False
-
     @classmethod
     def default_config(cls) -> dict[str, Any]:
         return AimiConfig().model_dump(by_alias=True)
 
+    def __init__(self, config: Any, bus: MessageBus):
+        if isinstance(config, dict):
+            config = AimiConfig.model_validate(config)
+        super().__init__(config, bus)
+        self.config: AimiConfig = config
+        self._client: "aimi.Client | None" = None
+
     async def start(self) -> None:
-        """Start the AIMI client and forward messages to nanobot."""
-        self._running = True
+        if not AIMI_AVAILABLE:
+            logger.error("aimi package not installed. Run: pip install -e ../aimi_sdk/aimi_py")
+            return
 
-        @self.client.event
-        async def on_ready() -> None:
-            _LOGGER.info("AimiChannel connected as aimi client")
+        if not self.config.token:
+            logger.error("AIMI token not configured")
+            return
 
-        @self.client.event
-        async def on_message(message: aimi.Message) -> None:
-            # Ignore messages from ourselves (if bot user is known)
+        self._client = aimi.Client(bot_token=self.config.token)
+
+        @self._client.event
+        async def on_message(msg: "aimi.Message") -> None:
+            text = ""
+            if msg.content_obj and msg.content_obj.text:
+                text = msg.content_obj.text
             await self._handle_message(
-                sender_id=str(message.author.id),
-                chat_id=str(message.channel_id),
-                content=message.content,
-                media=[],
-                metadata={"message_id": str(message.id)},
+                sender_id=msg.sender_id,
+                chat_id=msg.session_id,
+                content=text,
             )
 
-        # Override gateway URL if configured
-        if self.config.gateway_url:
-            self.client.http.base_url = self.config.gateway_url.replace("wss:", "https:").replace("ws:", "http:")
-            # TODO: pass gateway_url override to AimiWebSocket if supported
+        @self._client.event
+        async def on_connect() -> None:
+            logger.info("AIMI channel connected")
 
-        await self.client.start(self.config.token)
+        @self._client.event
+        async def on_disconnect() -> None:
+            logger.info("AIMI channel disconnected")
+
+        @self._client.event
+        async def on_error(exc: Exception) -> None:
+            logger.error("AIMI channel error: {}", exc)
+
+        self._running = True
+        try:
+            await self._client.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("AIMI client error: {}", e)
+        finally:
+            self._running = False
 
     async def stop(self) -> None:
-        """Stop the AIMI client."""
         self._running = False
-        await self.client.close()
+        if self._client:
+            await self._client.close()
+            self._client = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send nanobot's reply back to AIMI."""
-        channel = aimi.models.TextChannel(self.client, {"id": int(msg.chat_id)})
-        await channel.send(msg.content)
+        if not self._client or not self._client.connected:
+            logger.warning("AIMI client not connected; dropping outbound message")
+            return
+        try:
+            await self._client.send_text(
+                session_id=msg.chat_id,
+                text=msg.content,
+            )
+        except Exception as e:
+            logger.error("Error sending AIMI message: {}", e)
+            raise
