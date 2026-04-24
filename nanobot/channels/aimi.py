@@ -41,7 +41,7 @@ class AimiChannel(BaseChannel):
             config = AimiConfig.model_validate(config)
         super().__init__(config, bus)
         self.config: AimiConfig = config
-        self._client: "aimi.Client | None" = None
+        self._client: aimi.Client | None = None
 
     async def start(self) -> None:
         if not AIMI_AVAILABLE:
@@ -55,7 +55,18 @@ class AimiChannel(BaseChannel):
         self._client = aimi.Client(bot_token=self.config.token)
 
         @self._client.event
-        async def on_message(msg: "aimi.Message") -> None:
+        async def on_message(raw: Any) -> None:
+            # SDK currently passes the raw JSON dict; wrap it into Message.
+            try:
+                if isinstance(raw, dict):
+                    payload = raw.get("data", raw)
+                    msg = aimi.Message.model_validate(payload)
+                else:
+                    msg = raw
+            except Exception:
+                logger.exception("AIMI failed to parse incoming message: {}", raw)
+                return
+
             text = ""
             if msg.content_obj and msg.content_obj.text:
                 text = msg.content_obj.text
@@ -65,6 +76,8 @@ class AimiChannel(BaseChannel):
                 content=text,
             )
 
+        # NOTE: These events are registered but the SDK currently only
+        # dispatches "message". They are kept for forward-compatibility.
         @self._client.event
         async def on_connect() -> None:
             logger.info("AIMI channel connected")
@@ -81,11 +94,11 @@ class AimiChannel(BaseChannel):
         try:
             await self._client.start()
         except asyncio.CancelledError:
+            self._running = False
             raise
         except Exception as e:
-            logger.error("AIMI client error: {}", e)
-        finally:
             self._running = False
+            logger.error("AIMI client error: {}", e)
 
     async def stop(self) -> None:
         self._running = False
@@ -94,11 +107,11 @@ class AimiChannel(BaseChannel):
             self._client = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        if not self._client or not self._client.connected:
+        if not self._client or not self._client.is_connected():
             logger.warning("AIMI client not connected; dropping outbound message")
             return
         try:
-            await self._client.send_text(
+            await self._client.send_message(
                 session_id=msg.chat_id,
                 text=msg.content,
             )
