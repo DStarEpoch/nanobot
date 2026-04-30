@@ -42,6 +42,7 @@ class AimiChannel(BaseChannel):
         super().__init__(config, bus)
         self.config: AimiConfig = config
         self._client: aimi.Client | None = None
+        self._session_role_fetched: set[str] = set()
 
     async def start(self) -> None:
         if not AIMI_AVAILABLE:
@@ -70,10 +71,22 @@ class AimiChannel(BaseChannel):
             text = ""
             if msg.content_obj and msg.content_obj.text:
                 text = msg.content_obj.text
+
+            meta: dict[str, Any] = {}
+            if self._client and msg.session_id not in self._session_role_fetched:
+                try:
+                    session_role = await self._client.get_session_role_prompt(msg.session_id)
+                    self._session_role_fetched.add(msg.session_id)
+                    if session_role:
+                        meta["session_role"] = session_role
+                except Exception:
+                    logger.exception("Failed to get session_role_prompt for session {}", msg.session_id)
+
             await self._handle_message(
                 sender_id=msg.sender_id,
                 chat_id=msg.session_id,
                 content=text,
+                metadata=meta,
             )
 
         # NOTE: These events are registered but the SDK currently only
